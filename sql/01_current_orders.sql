@@ -1,29 +1,45 @@
 -- 01_current_orders.sql
--- Reconstructs one current-state row per order_id from data/order_events.csv.
+-- Deliverable 1: reconstruct exactly one current-state row per order.
 --
--- ASSUMPTION (fact #2): event_ts is unreliable (mixed formats: most rows
--- 'YYYY-MM-DD HH:MM:SS', but O1026/O1027/O1028's op='c' row is 'MM/DD/YYYY HH:MM').
--- "Latest event" is determined by MAX(event_seq) per order_id, NOT by event_ts,
--- per the assignment's own description that event_seq increments per order.
---
--- ASSUMPTION (fact #3): 8 of 210 orders have their latest event = delete ('d').
--- These are NOT dropped -- they remain as one row each, with current_status
--- always forced to 'deleted', regardless of whatever order_status happens to
--- be on that delete row. 8 of these 8 delete rows carry a stale order_status
--- of 'completed' left over from before the delete, so this override is
--- unconditional, not just a fallback for blank/null values -- see the CASE
--- expression below for why trusting the raw value would be wrong.
---
--- ASSUMPTION (fact #1): order_status has 8 raw string variants for 4 logical
--- statuses (pending/completed/refunded/voided). Always TRIM(LOWER(...)) before
--- comparing. This normalization is applied once here so every downstream query
--- reuses current_status already normalized -- no re-deriving status logic elsewhere.
---
--- create_ts / create_month: taken from the op='c' row (== event_seq = 1, confirmed
--- always true in this data) per "an order belongs to the month of its create event".
--- Handles the two event_ts formats via TRY_STRPTIME fallback chain.
+-- order_events.csv is a change log, every order shows up as several rows
+-- (a create, some updates, sometimes a delete). The job here is to
+-- collapse that history down to one row per order, showing its current
+-- status.
 
+-- Setup: load the raw CSVs as tables (run once).
+CREATE TABLE order_events AS SELECT * FROM 'data/order_events.csv';
+CREATE TABLE order_items AS SELECT * FROM 'data/order_items.csv';
+CREATE TABLE products AS SELECT * FROM 'data/products.csv';
+CREATE TABLE stores AS SELECT * FROM 'data/stores.csv';
+
+-- Check: 430 events, 530 line items, 28 products, 4 stores
+SELECT
+  (SELECT COUNT(*) FROM order_events) AS order_events_count,
+  (SELECT COUNT(*) FROM order_items)  AS order_items_count,
+  (SELECT COUNT(*) FROM products)     AS products_count,
+  (SELECT COUNT(*) FROM stores)       AS stores_count;
+
+-- Issue 1: how do you know which row is "latest"? There are two candidates,
+-- event_seq (a plain sequence number) and event_ts (a timestamp). They
+-- should agree, but 3 rows (O1026/O1027/O1028's create events) turned out
+-- to have event_ts in a completely different date format than the rest.
+--
+-- Assumption 1: trust event_seq, not event_ts, since the assignment itself
+-- describes event_seq as "increments per order" -- it's built to be
+-- reliable in a way a timestamp isn't.
+
+-- Issue 2: what happens to the 8 orders whose most recent event is a
+-- delete? Do they disappear from this table, or stay visible?
+--
+-- Assumption 2: keep them as one row each, with status forced to 'deleted'.
+-- "Derive exactly one current row per order" means every order gets a row,
+-- deletion is a status, not a disappearance.
+
+CREATE TABLE current_orders AS
 WITH parsed_events AS (
+    -- Clean up two things before anything else: normalize inconsistent
+    -- status spelling, and parse both event_ts formats so nothing silently
+    -- fails or gets miscounted.
     SELECT
         order_id,
         store_id,
@@ -38,7 +54,7 @@ WITH parsed_events AS (
     FROM order_events
 ),
 latest_event AS (
-    -- one row per order_id: the row with the max event_seq (authoritative ordering)
+    -- One row per order_id: the row with the max event_seq.
     SELECT *
     FROM (
         SELECT
@@ -49,7 +65,9 @@ latest_event AS (
     WHERE rn = 1
 ),
 create_event AS (
-    -- the op='c' row per order (== event_seq = 1); used only for create_ts/create_month
+    -- The op='c' row per order (== event_seq = 1), needed separately from
+    -- the "latest" row because the May-2024 question later asks for the
+    -- month of the CREATE event, not whatever the order's current status is.
     SELECT
         order_id,
         event_ts_parsed AS create_ts
@@ -62,10 +80,13 @@ SELECT
     le.customer_id,
     le.event_seq        AS latest_event_seq,
     le.op                AS latest_op,
-    -- deleted rows ALWAYS resolve to 'deleted' regardless of raw order_status on
-    -- that delete row -- 8 of the 210 delete rows carry a stale order_status of
-    -- 'completed' (a data-entry artifact of the delete event), and trusting that
-    -- raw value would leak deleted orders into completed-order revenue totals.
+    -- The actual bug-fix line: deleted rows ALWAYS resolve to 'deleted',
+    -- regardless of the raw order_status on that delete row. 8 of the 210
+    -- delete rows carry a stale order_status of 'completed' left over from
+    -- before the delete happened (a data-entry artifact) -- an earlier
+    -- version of this logic only forced 'deleted' when that raw value was
+    -- blank, which let those 8 orders leak into "completed" revenue later.
+    -- This override is unconditional on purpose.
     CASE
         WHEN le.op = 'd' THEN 'deleted'
         ELSE le.status_norm
@@ -76,4 +97,7 @@ SELECT
 FROM latest_event le
 LEFT JOIN create_event ce USING (order_id)
 ORDER BY le.order_id;
--- Expected: 210 rows (one per order_id), including the 8 'd'-latest orders.
+
+-- Check: 210 rows, one per order, including the 8 deleted ones.
+SELECT COUNT(*) FROM current_orders;
+SELECT * FROM current_orders WHERE current_status = 'deleted';

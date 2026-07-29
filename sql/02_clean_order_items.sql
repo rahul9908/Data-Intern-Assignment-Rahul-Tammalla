@@ -1,48 +1,48 @@
 -- 02_clean_order_items.sql
--- Cleans data/order_items.csv. Reused by 03_revenue_may2024.sql.
+-- Deliverable 2: clean order_items.csv.
 --
--- Issues found and handling (see also data_quality_issues.md):
---
--- 1. unit_price: 5 rows have a literal '$' prefix (e.g. '$34.41') stored as text.
---    Stripped '$' before CAST to a numeric type.
---
--- 2. discount_amount is NULL in 381/530 rows. COALESCE'd to 0 -- NULL must not
---    propagate through net-revenue arithmetic (NULL * x = NULL would silently
---    drop these rows from any SUM).
---
--- 3. Orphan product_id 'P999' (1 row, I-number unknown til joined) has no match
---    in products.csv. DECISION: keep the line item (revenue is real, order total
---    should not silently shrink) but LEFT JOIN to products so category comes back
---    NULL, then COALESCE category -> 'Uncategorized' and flag via is_orphan_product.
---    Alternative (excluding it) would understate revenue with no stated business
---    reason to drop a paid line item just because master data is incomplete --
---    flagging was judged the safer default. Reviewer can filter is_orphan_product
---    if the other interpretation is preferred.
---
--- 4. Known bad rows (order O1019):
---      I5041 quantity=1, unit_price=0        -> net = 0, not excluded (quantity/price
---        are both individually "valid" values, zero-price could be a legitimate promo
---        item; flagged via has_zero_price so it's visible, not silently dropped).
---      I5042 quantity=0                       -> net = 0 regardless of price; flagged
---        via has_zero_qty. A zero-quantity line item contributes nothing to revenue
---        by construction, so it is harmless to keep, but it's still a data-entry bug
---        worth surfacing.
---      I5043 unit_price=-5.0, quantity=3      -> net = -15.0. Negative unit_price is
---        not a plausible price; DECISION: flag via has_negative_price but still
---        include in net revenue as computed (do not silently clip to 0) because
---        we don't know if this represents a return/adjustment vs. a typo, and
---        clipping would be its own silent assumption. Flag lets analyst decide.
---
--- 5. Duplicate line items: (order_id, product_id, quantity, unit_price,
---    discount_amount) identical across two distinct order_item_id values for
---    (O1094, P008) [I5246/I5249] and (O1142, P026) [I5357/I5358]. These look like
---    true duplicate entries (not two genuinely separate line items that happen to
---    share qty/price), since order_item_id is otherwise the grain key and nothing
---    else differs. DECISION: dedupe, keeping the lowest order_item_id, flagged via
---    a comment -- NOT silently dropped without a note. Other repeated
---    (order_id, product_id) pairs with differing qty/price/discount (e.g. O1030/P018,
---    O1082/P024, etc.) are treated as legitimate separate line items and kept as-is.
+-- Once order state was figured out (see 01_current_orders.sql), the next
+-- problem was the line items themselves, several real data-quality issues
+-- showed up here, each one handled deliberately instead of silently
+-- dropped or guessed at.
 
+-- Setup: assumes order_events, order_items, products, stores already exist
+-- (created in 01_current_orders.sql). If running this file standalone:
+-- CREATE TABLE order_items AS SELECT * FROM 'data/order_items.csv';
+-- CREATE TABLE products AS SELECT * FROM 'data/products.csv';
+
+-- Issue 1: unit_price had a literal '$' prefix on 5 rows (e.g. '$34.41'),
+-- stored as text. Stripped '$' before casting to a number.
+--
+-- Issue 2: discount_amount was NULL on 381 of 530 rows. Left alone, NULL
+-- propagates through arithmetic (NULL * x = NULL), which would silently
+-- drop these rows from any revenue SUM.
+--
+-- Assumption 3: a missing discount means 0, not "unknown". COALESCE'd to 0.
+--
+-- Issue 3: one line item (product_id 'P999') references a product that
+-- isn't in products.csv.
+--
+-- Assumption 4: keep the line item, don't drop it, the transaction is real
+-- money, dropping it would silently understate that order's total. Labeled
+-- 'Uncategorized' via a LEFT JOIN instead of guessed, flagged via
+-- is_orphan_product so it's easy to find and re-decide on later.
+--
+-- Issue 4: a few individually odd rows on order O1019: I5041 has
+-- unit_price=0, I5042 has quantity=0, I5043 has unit_price=-5.0.
+--
+-- Assumption 5: none of these is clearly a data error versus a legitimate
+-- edge case (a promo item, a return adjustment), so all three are kept
+-- as-is and flagged (has_zero_price, has_zero_qty, has_negative_price)
+-- rather than silently clipped or excluded.
+--
+-- Issue 5: two pairs of rows are exact duplicates (same order, product,
+-- quantity, price, discount, just a different order_item_id):
+-- (O1094, P008) and (O1142, P026). These get deduplicated, keeping the
+-- first-seen order_item_id. Not really a judgment call, they're genuinely
+-- identical.
+
+CREATE TABLE clean_order_items AS
 WITH cleaned AS (
     SELECT
         oi.order_item_id,
@@ -83,3 +83,8 @@ SELECT
 FROM cleaned
 WHERE dup_rn = 1  -- drops the 2 exact-duplicate rows (I5249, I5358), keeps first-seen
 ORDER BY order_id, order_item_id;
+
+-- Check: 528 rows (530 raw minus 2 exact duplicates).
+SELECT COUNT(*) FROM clean_order_items;
+SELECT * FROM clean_order_items
+WHERE has_zero_qty OR has_zero_price OR has_negative_price OR is_orphan_product;

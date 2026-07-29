@@ -1,31 +1,36 @@
 -- 03_revenue_may2024.sql
--- Q3a: net revenue per store for May-2024-created, currently-completed orders.
--- Q3b: per store, the single category that drove the most of that revenue.
+-- Deliverable 3: the two May 2024 revenue questions.
 --
--- Filters (per assignment wording, fact #6):
---   - order's CURRENT status (from 01_current_orders.sql, already normalized) = 'completed'
---   - order's CREATE-event month (create_month from 01_current_orders.sql) = May 2024
---     (NOT latest event month -- see fact #5)
--- net = quantity * unit_price - discount_amount, using cleaned line items from 02.
---
--- Inactive products (fact #8): is_active=false line items are NOT excluded --
--- assignment only asks to filter by order status + month; product active/inactive
--- is a separate, unrelated attribute and excluding it would be an unrequested
--- interpretation. These contribute 50 line items / $3,185.94 (verified via
--- is_active = false as a boolean filter, which correctly excludes the orphan
--- P999 row too, since it has no is_active value at all) to the May 2024
--- completed total. If the intent was to exclude discontinued products from a
--- forward-looking revenue report, that's a follow-up question for
--- stakeholders, not a silent default here.
+-- With order state and clean line items both figured out, the last step
+-- is scoping revenue down to completed orders created in May 2024, then
+-- answering (a) total per store, (b) top category per store. This file is
+-- written to stand alone, so the CTE chain from 01 and 02 is re-derived
+-- here rather than reused.
 
--- scoped_may2024_completed is a CTE, repeated verbatim at the top of the Q3a
--- and Q3b statements below (no CREATE VIEW / persistent object -- plain
--- read-only SQL, no state left behind after running this file).
+-- Setup: assumes order_events, order_items, products, stores already exist
+-- (created in 01_current_orders.sql). If running this file standalone:
+-- CREATE TABLE order_events AS SELECT * FROM 'data/order_events.csv';
+-- CREATE TABLE order_items AS SELECT * FROM 'data/order_items.csv';
+-- CREATE TABLE products AS SELECT * FROM 'data/products.csv';
+
+-- Wording issue 1: "an order belongs to the month of its create event", easy
+-- to misread as the month of its current/latest status.
+--
+-- Assumption 6: if an order was created in April but marked completed in
+-- May, it still belongs to April. The month always comes from the order's
+-- create (op='c') event, never from its latest event.
+--
+-- Wording issue 2: "the category that drove the most revenue", easy to
+-- misread as one single winner across everything.
+--
+-- Assumption 7: answered per store, four separate answers, not one global
+-- winner across all stores combined.
+
+-- ============================================================
 -- Q3a: net revenue per store
+-- ============================================================
+CREATE TABLE q3a_revenue_per_store AS
 WITH parsed_events AS (
-    -- reuse of 01_current_orders.sql logic; inlined here only because this is
-    -- a single-file deliverable per file -- do not re-derive "latest event"
-    -- logic anywhere else, always go through this CTE (or the 01 query directly).
     SELECT
         order_id, store_id, event_seq, op,
         TRIM(LOWER(order_status)) AS status_norm,
@@ -45,20 +50,18 @@ create_event AS (
     SELECT order_id, event_ts_parsed AS create_ts
     FROM parsed_events WHERE op = 'c'
 ),
-current_orders AS (
+current_orders_tmp AS (
     SELECT
         le.order_id,
         le.store_id,
-        -- deleted rows ALWAYS resolve to 'deleted' -- see 01_current_orders.sql
-        -- for why the raw order_status on the delete row cannot be trusted.
+        -- same unconditional delete-override as 01_current_orders.sql --
+        -- see that file for the bug this fixes.
         CASE WHEN le.op = 'd' THEN 'deleted' ELSE le.status_norm END AS current_status,
         DATE_TRUNC('month', ce.create_ts) AS create_month
     FROM latest_event le
     LEFT JOIN create_event ce USING (order_id)
 ),
-clean_items AS (
-    -- reuse of 02_clean_order_items.sql (dedup + $ strip + discount coalesce);
-    -- inlined for the same single-file-deliverable reason as above.
+clean_items_tmp AS (
     SELECT
         oi.order_id, oi.product_id,
         oi.quantity,
@@ -75,12 +78,14 @@ clean_items AS (
     LEFT JOIN products p ON p.product_id = oi.product_id
 ),
 scoped_may2024_completed AS (
+    -- This is where both wording assumptions become real filters:
+    -- current_status = 'completed' and create_month = May 2024.
     SELECT
         co.store_id,
         ci.category,
         (ci.quantity * ci.unit_price - ci.discount_amount) AS net_revenue
-    FROM clean_items ci
-    JOIN current_orders co ON co.order_id = ci.order_id
+    FROM clean_items_tmp ci
+    JOIN current_orders_tmp co ON co.order_id = ci.order_id
     WHERE ci.dup_rn = 1
       AND co.current_status = 'completed'
       AND co.create_month = DATE '2024-05-01'
@@ -90,11 +95,17 @@ FROM scoped_may2024_completed
 GROUP BY store_id
 ORDER BY store_id;
 
--- Q3b: top category per store by completed net revenue (same CTE chain,
--- repeated verbatim -- see note above on why there's no shared view).
--- RANK() partitioned BY store_id (not a global top-N) -- exactly one row per
--- store expected (4 stores total). Ties (if any) would produce >1 row per
--- store; none observed in this data.
+-- Check: S1 4931.07, S2 5441.48, S3 7123.14, S4 8590.83 (total 26,086.52)
+SELECT * FROM q3a_revenue_per_store;
+
+-- ============================================================
+-- Q3b: top category per store
+-- ============================================================
+-- Same filtering as Q3a, but grouped by (store_id, category) instead of
+-- just store_id, then ranked within each store so only the single
+-- best-performing category per store survives (RANK() PARTITION BY
+-- store_id, not a global top-N -- exactly one row per store expected).
+CREATE TABLE q3b_top_category_per_store AS
 WITH parsed_events AS (
     SELECT
         order_id, store_id, event_seq, op,
@@ -115,7 +126,7 @@ create_event AS (
     SELECT order_id, event_ts_parsed AS create_ts
     FROM parsed_events WHERE op = 'c'
 ),
-current_orders AS (
+current_orders_tmp AS (
     SELECT
         le.order_id,
         le.store_id,
@@ -124,7 +135,7 @@ current_orders AS (
     FROM latest_event le
     LEFT JOIN create_event ce USING (order_id)
 ),
-clean_items AS (
+clean_items_tmp AS (
     SELECT
         oi.order_id, oi.product_id,
         oi.quantity,
@@ -145,8 +156,8 @@ scoped_may2024_completed AS (
         co.store_id,
         ci.category,
         (ci.quantity * ci.unit_price - ci.discount_amount) AS net_revenue
-    FROM clean_items ci
-    JOIN current_orders co ON co.order_id = ci.order_id
+    FROM clean_items_tmp ci
+    JOIN current_orders_tmp co ON co.order_id = ci.order_id
     WHERE ci.dup_rn = 1
       AND co.current_status = 'completed'
       AND co.create_month = DATE '2024-05-01'
@@ -165,3 +176,22 @@ SELECT store_id, category, category_revenue
 FROM ranked
 WHERE rnk = 1
 ORDER BY store_id;
+
+-- Check: S1 Topicals, S2 Concentrates, S3 Accessories, S4 Vapes
+SELECT * FROM q3b_top_category_per_store;
+
+-- Inactive products (is_active=false) are NOT excluded from either result
+-- above -- the assignment only asked to filter by order status + month,
+-- product active/inactive is a separate attribute.
+--
+-- Assumption 8: leave inactive products in (50 line items / $3,185.94 of
+-- the total). Flagged as a question for the business rather than deciding
+-- silently.
+
+-- Bug found and fixed: an earlier version of the delete-status logic (see
+-- current_orders_tmp above) only forced 'deleted' when the raw status was
+-- blank. 8 delete-latest orders carried a stale order_status='completed',
+-- so they leaked into these totals. Fixing the override to be
+-- unconditional moved the May-2024 total from $27,174.68 down to
+-- $26,086.52, and flipped store S3's top category from Concentrates to
+-- Accessories.
