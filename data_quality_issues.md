@@ -42,11 +42,13 @@ pandas; the Q3a/Q3b fix in item #4 was verified directly by running the SQL thro
    8 of them, so they were NOT falling out of scope — they leaked directly
    into the May-2024 "completed" revenue totals in `03_revenue_may2024.sql`,
    inflating Q3a/Q3b. Fixed by making the `CASE WHEN le.op = 'd' THEN
-   'deleted' ...` branch unconditional in both `01_current_orders.sql` and
-   the duplicated CASE logic in `03_revenue_may2024.sql`, so deleted orders
-   can never resolve to `'completed'` regardless of the raw column value.
-   Verified: exactly 8 delete-latest orders had `order_status='completed'`
-   pre-fix; Q3a total dropped from $27,174.68 to $26,086.52 after the fix.
+   'deleted' ...` branch unconditional in `01_current_orders.sql`, so deleted
+   orders can never resolve to `'completed'` regardless of the raw column
+   value. `03_revenue_may2024.sql` joins `current_orders` directly rather
+   than re-deriving this logic, so the fix only ever has to live in one
+   place. Verified: exactly 8 delete-latest orders had
+   `order_status='completed'` pre-fix; Q3a total dropped from $27,174.68 to
+   $26,086.52 after the fix.
 
 5. **"Order belongs to the month of its create event"** — the month must come
    from the `op='c'` row (== `event_seq=1`, confirmed always true in this

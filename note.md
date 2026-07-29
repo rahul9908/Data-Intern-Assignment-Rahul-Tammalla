@@ -29,7 +29,7 @@ Impact: total May 2024 net revenue went from $27,174.68 to $26,086.52, and store
 
 ## What I'd do next with more time
 
-Add real automated checks (every order should have exactly one create event, no null discount should ever slip into a revenue total unflagged), get an actual answer on whether inactive-product revenue should count, and stop repeating the delete-handling logic across two files instead of one shared place.
+Add real automated checks (every order should have exactly one create event, no null discount should ever slip into a revenue total unflagged), and get an actual answer on whether inactive-product revenue should count.
 
 ## AI tools used
 

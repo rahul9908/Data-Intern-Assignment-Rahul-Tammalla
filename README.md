@@ -63,4 +63,4 @@ If this event log never stopped and had hundreds of millions of rows, I wouldn't
 
 ## What I'd do with more time
 
-Add some actual automated checks (every order should have exactly one create event, no null discount should ever sneak into a revenue total unflagged), get a real answer on whether inactive-product revenue should even count here, and stop repeating the delete-handling logic in two different files.
+Add some actual automated checks (every order should have exactly one create event, no null discount should ever sneak into a revenue total unflagged), and get a real answer on whether inactive-product revenue should even count here.
